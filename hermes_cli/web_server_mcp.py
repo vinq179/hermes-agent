@@ -116,6 +116,91 @@ def _mcp_oauth_transaction(flow) -> threading.Lock:
         return _mcp_oauth_transactions.setdefault(key, threading.Lock())
 
 
+def _run_dashboard_mcp_device_oauth(flow, cfg: dict) -> None:
+    """Use Hermes' RFC 8628 CLI implementation with Dashboard-managed consent.
+
+    Preserve profile isolation and the existing OAuth store; unlike the
+    browser callback flow, this requires no HTTPS listener on a LAN host.
+    """
+    import asyncio
+
+    from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server, _save_mcp_server
+    try:
+        from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from tools.mcp_dashboard_device_oauth import HUB_CLIENT_ID, HUB_SCOPE
+        from tools.mcp_oauth import HermesTokenStorage
+        from tools.mcp_oauth_device import login_device
+        from tools.mcp_oauth_manager import get_manager
+
+        home_token = secret_token = None
+        try:
+            home_token = set_hermes_home_override(flow.hermes_home)
+            secret_token = set_secret_scope(
+                build_profile_secret_scope(Path(flow.hermes_home)), profile_home=flow.hermes_home
+            )
+            config = {
+                **cfg,
+                "auth": "oauth",
+                "oauth": {
+                    "client_id": HUB_CLIENT_ID,
+                    "scope": HUB_SCOPE,
+                    "flow": "device",
+                },
+            }
+            transaction = _mcp_oauth_transaction(flow)
+            with transaction:
+                storage = HermesTokenStorage(flow.server_name)
+                backup = storage.snapshot()
+                manager = get_manager()
+                previous_entry = manager.remove(flow.server_name, hermes_home=flow.hermes_home)
+                try:
+                    asyncio.run(login_device(
+                        flow.server_name, cfg["url"], config["oauth"],
+                        on_authorization=flow.publish_device_authorization,
+                        is_cancelled=lambda: flow.cancelled,
+                    ))
+                    if flow.cancelled:
+                        raise RuntimeError("Device authorization cancelled by user")
+                    tools = _probe_single_server(
+                        flow.server_name, config,
+                        connect_timeout=max(float(config.get("connect_timeout", 0) or 0), 60),
+                    )
+                    if not tools or not _oauth_tokens_present(flow.server_name):
+                        raise RuntimeError("DMCMS MCP did not return accessible authenticated tools")
+                    if not _save_mcp_server(flow.server_name, config):
+                        raise RuntimeError("Unable to save MCP configuration")
+                    flow.tools = [{"name": name, "description": desc} for name, desc in tools]
+                    if flow.reconnect_live:
+                        from tools.mcp_tool_loop import reconnect_mcp_server
+
+                        try:
+                            reconnect_mcp_server(flow.server_name)
+                        except Exception:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "DMCMS authorized, but live MCP reconnect failed", exc_info=True,
+                            )
+                    flow.mark_approved()
+                except Exception:
+                    storage.restore(backup)
+                    manager.restore_entry(
+                        flow.server_name, previous_entry, hermes_home=flow.hermes_home,
+                    )
+                    raise
+        finally:
+            if secret_token is not None:
+                reset_secret_scope(secret_token)
+            if home_token is not None:
+                reset_hermes_home_override(home_token)
+    except Exception as exc:
+        from tools.mcp_dashboard_oauth import exception_message
+
+        flow.mark_error(exception_message(exc))
+    finally:
+        flow.mark_worker_done()
+
+
 def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
     """Run the normal MCP probe with dashboard redirect/callback handlers."""
     from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server, _save_mcp_server

@@ -2,6 +2,31 @@ import { describe, expect, it, vi } from "vitest";
 import { completeMcpDashboardOAuth } from "./mcp-dashboard-oauth";
 
 describe("completeMcpDashboardOAuth", () => {
+  it("opens the Hub device verification page and shows the code", async () => {
+    const authWindow = { location: { href: "" }, opener: {}, closed: false } as unknown as Window;
+    const onVerificationCode = vi.fn();
+    const result = await completeMcpDashboardOAuth({
+      serverName: "dmcms",
+      start: vi.fn().mockResolvedValue({
+        flow_id: "device-test", server_name: "dmcms", status: "authorization_required",
+        user_code: "ABCD-2345",
+        authorization_url: "https://my.aivaults.top/oauth/consent?user_code=ABCD-2345",
+        error: null,
+      }),
+      status: vi.fn().mockResolvedValue({
+        flow_id: "device-test", server_name: "dmcms", status: "approved",
+        authorization_url: "https://my.aivaults.top/oauth/consent?user_code=ABCD-2345",
+        error: null, tools: [{ name: "list", description: "Read-only list" }],
+      }),
+      open: vi.fn().mockReturnValue(authWindow),
+      onVerificationCode,
+      sleep: async () => {},
+    });
+    expect(onVerificationCode).toHaveBeenCalledWith("ABCD-2345");
+    expect(authWindow.location.href).toBe("https://my.aivaults.top/oauth/consent?user_code=ABCD-2345");
+    expect(result.status).toBe("approved");
+  });
+
   it("opens the authorization URL in the dashboard browser and polls to approval", async () => {
     const authWindow = { location: { href: "" }, opener: {} } as unknown as Window;
     const open = vi.fn().mockReturnValue(authWindow);
