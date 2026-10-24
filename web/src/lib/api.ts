@@ -1665,6 +1665,7 @@ export interface McpOAuthFlow {
   server_name: string;
   status: "starting" | "authorization_required" | "approved" | "error";
   authorization_url: string | null;
+  user_code?: string | null;
   error: string | null;
   tools?: Array<{ name: string; description: string }>;
 }

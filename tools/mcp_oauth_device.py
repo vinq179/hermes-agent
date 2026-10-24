@@ -141,7 +141,7 @@ def _positive_seconds(value, label):
     return value
 
 
-async def _authorize(client, provider, cfg):
+async def _authorize(client, provider, cfg, *, on_authorization=None, is_cancelled=None):
     from tools.mcp_oauth_provider import google_offline_access_params
     from tools.mcp_tool import sdk_httpx
 
@@ -161,17 +161,25 @@ async def _authorize(client, provider, cfg):
     interval = _positive_seconds(authorization.get("interval", 5), "interval")
     deadline = time.monotonic() + min(_positive_seconds(authorization["expires_in"], "expires_in"),
                                      _positive_seconds(cfg.get("timeout", 300), "timeout"))
-    print(f"\n  MCP OAuth: open {verification} on any device.\n  Code: {authorization['user_code']}\n"
-          "  Waiting for approval...\n", file=sys.stderr, flush=True)
+    if on_authorization is not None:
+        # Dashboard owns the verification UI; never print the device secret.
+        await on_authorization(authorization)
+    else:
+        print(f"\n  MCP OAuth: open {verification} on any device.\n  Code: {authorization['user_code']}\n"
+              "  Waiting for approval...\n", file=sys.stderr, flush=True)
     token_data = {"client_id": context.client_info.client_id, "device_code": authorization["device_code"],
                   "grant_type": DEVICE_GRANT, "resource": resource}
     token_data, headers = context.prepare_token_auth(token_data, {})
     httpx = sdk_httpx()
     while True:
+        if is_cancelled is not None and is_cancelled():
+            raise RuntimeError("Device authorization cancelled by user")
         remaining = deadline - time.monotonic()
         if remaining <= interval:
             raise RuntimeError("Device authorization expired before approval; run login again")
         await asyncio.sleep(interval)
+        if is_cancelled is not None and is_cancelled():
+            raise RuntimeError("Device authorization cancelled by user")
         request = provider._prepare_token_request(httpx.Request("POST", str(context.oauth_metadata.token_endpoint),
                                                                data=token_data, headers=headers))
         try:
@@ -201,7 +209,7 @@ async def _authorize(client, provider, cfg):
         raise RuntimeError(f"Device authorization failed: {safe_error}")
 
 
-async def login_device(name, server_url, oauth_config):
+async def login_device(name, server_url, oauth_config, *, on_authorization=None, is_cancelled=None):
     """Authorize then commit state in the active profile; failed grants preserve old state."""
     from tools.mcp_oauth import _build_client_metadata
     from tools.mcp_oauth_manager import HermesMCPOAuthProvider, get_manager
@@ -219,7 +227,9 @@ async def login_device(name, server_url, oauth_config):
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             await _discover(client, provider)
             await _register(client, provider, cfg)
-            tokens = await _authorize(client, provider, cfg)
+            tokens = await _authorize(
+                client, provider, cfg, on_authorization=on_authorization, is_cancelled=is_cancelled,
+            )
     except (ValueError, TypeError, KeyError):
         raise RuntimeError("Device OAuth response has invalid fields") from None
     except httpx.HTTPError:

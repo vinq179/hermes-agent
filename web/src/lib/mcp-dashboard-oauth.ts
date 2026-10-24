@@ -7,6 +7,7 @@ type CompleteOptions = {
   open: (url?: string | URL, target?: string, features?: string) => unknown;
   sleep?: (milliseconds: number) => Promise<void>;
   maxPollFailures?: number;
+  onVerificationCode?: (code: string) => void;
 };
 
 const defaultSleep = (milliseconds: number) =>
@@ -19,6 +20,7 @@ export async function completeMcpDashboardOAuth({
   open,
   sleep = defaultSleep,
   maxPollFailures = 3,
+  onVerificationCode,
 }: CompleteOptions): Promise<McpOAuthFlow> {
   // Open synchronously from the click handler, before the first await. Browsers
   // otherwise classify the later OAuth popup as unsolicited and block it.
@@ -36,6 +38,7 @@ export async function completeMcpDashboardOAuth({
     if (!started.authorization_url) {
       throw new Error("OAuth server did not provide an authorization URL");
     }
+    if (started.user_code) onVerificationCode?.(started.user_code);
     authWindow.location.href = started.authorization_url;
   } catch (error) {
     authWindow.close();

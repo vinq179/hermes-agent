@@ -30,6 +30,7 @@ router = APIRouter()
 _config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
 _require_token = late("_require_token")
 _run_dashboard_mcp_oauth = late("_run_dashboard_mcp_oauth", "hermes_cli.web_server_mcp")
+_run_dashboard_mcp_device_oauth = late("_run_dashboard_mcp_device_oauth", "hermes_cli.web_server_mcp")
 load_config = late("load_config", "hermes_cli.config")
 save_config = late("save_config", "hermes_cli.config")
 save_env_value = late("save_env_value", "hermes_cli.config")
@@ -257,6 +258,7 @@ async def auth_mcp_server(name: str, request: Request, profile: Optional[str] = 
     from hermes_cli.mcp_config import _get_mcp_servers
     from hermes_constants import get_hermes_home
     from tools.mcp_dashboard_oauth import DashboardOAuthFlow, exception_message
+    from tools.mcp_dashboard_device_oauth import DashboardDeviceOAuthFlow, is_dmcms_oauth
 
     _require_token(request)
     _gc_mcp_oauth_flows()
@@ -287,12 +289,15 @@ async def auth_mcp_server(name: str, request: Request, profile: Optional[str] = 
     cfg["auth"] = "oauth"
 
     flow_id = secrets.token_urlsafe(24)
-    flow = DashboardOAuthFlow(
+    device_grant = is_dmcms_oauth(cfg)
+    flow = (DashboardDeviceOAuthFlow if device_grant else DashboardOAuthFlow)(
         flow_id=flow_id,
         server_name=name,
         profile=profile,
         hermes_home=flow_home,
-        redirect_uri=(cfg.get("oauth") or {}).get("redirect_uri") or _mcp_oauth_callback_url(request, name),
+        redirect_uri="" if device_grant else (
+            (cfg.get("oauth") or {}).get("redirect_uri") or _mcp_oauth_callback_url(request, name)
+        ),
         reconnect_live=flow_home == process_home,
     )
     with _mcp_oauth_flows_lock:
@@ -302,7 +307,8 @@ async def auth_mcp_server(name: str, request: Request, profile: Optional[str] = 
         if any(f.server_name == name and f.hermes_home == flow_home for f in live):
             raise HTTPException(status_code=409, detail=f"MCP OAuth for '{name}' is already in progress")
         _mcp_oauth_flows[flow_id] = flow
-    threading.Thread(target=_run_dashboard_mcp_oauth, args=(flow, cfg), daemon=True, name=f"mcp-oauth-{name}").start()
+    worker = _run_dashboard_mcp_device_oauth if device_grant else _run_dashboard_mcp_oauth
+    threading.Thread(target=worker, args=(flow, cfg), daemon=True, name=f"mcp-oauth-{name}").start()
     try:
         await flow.wait_for_authorization_url(timeout=30)
     except Exception as exc:

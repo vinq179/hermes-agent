@@ -38,6 +38,8 @@ function truncateText(value: string, maxLength: number): string {
   return value.length > maxLength ? value.slice(0, maxLength) + "..." : value;
 }
 
+const DMCMS_MCP_URL = "https://dmcms.aivaults.top/mcp";
+
 const TRANSPORT_TONE: Record<string, "success" | "warning" | "secondary"> = {
   http: "success",
   stdio: "warning",
@@ -75,6 +77,7 @@ export default function McpPage() {
   // Test results keyed by server name
   const [testing, setTesting] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState<string | null>(null);
+  const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, McpTestResult>>(
     {},
   );
@@ -190,6 +193,7 @@ export default function McpPage() {
         start: api.authMcpServer,
         status: api.getMcpOAuthFlow,
         open: window.open.bind(window),
+        onVerificationCode: setDeviceCode,
       });
       setTestResults((prev) => ({
         ...prev,
@@ -200,6 +204,43 @@ export default function McpPage() {
       showToast(`Could not sign in to the MCP server: ${errorMessage(e)}`, "error");
     } finally {
       setAuthenticating(null);
+      setDeviceCode(null);
+    }
+  };
+
+  const handleConnectDmcms = async () => {
+    const existing = servers.find((entry) => entry.name === "dmcms");
+    if (existing && (existing.url !== DMCMS_MCP_URL || existing.auth !== "oauth")) {
+      showToast("Name 'dmcms' is already assigned to another MCP server", "error");
+      return;
+    }
+    setAuthenticating("dmcms");
+    setDeviceCode(null);
+    try {
+      const result = await completeMcpDashboardOAuth({
+        serverName: "dmcms",
+        start: async (serverName) => {
+          if (!existing) {
+            await api.addMcpServer({ name: serverName, url: DMCMS_MCP_URL, auth: "oauth" });
+          }
+          return api.authMcpServer(serverName);
+        },
+        status: api.getMcpOAuthFlow,
+        open: window.open.bind(window),
+        onVerificationCode: setDeviceCode,
+      });
+      setTestResults((prev) => ({
+        ...prev,
+        dmcms: { ok: true, tools: result.tools ?? [] },
+      }));
+      await loadServers();
+      showToast("DMCMS MCP connected and authorized", "success");
+    } catch (error) {
+      await loadServers();
+      showToast(`Could not authorize DMCMS MCP: ${errorMessage(error)}`, "error");
+    } finally {
+      setAuthenticating(null);
+      setDeviceCode(null);
     }
   };
 
@@ -587,6 +628,31 @@ export default function McpPage() {
           </div>
         </div>
       )}
+
+      {/* First-party RFC 8628 device authorization: no external redirect. */}
+      <Card>
+        <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-sm font-medium">AIVaults DMCMS</h3>
+            <p className="text-xs text-muted-foreground">
+              Connect to DMCMS with Hub sign-in. No API key or public Hermes URL required.
+            </p>
+            {authenticating === "dmcms" && deviceCode && (
+              <p className="mt-2 text-sm" role="status">
+                Confirm this code matches the Hub page: <strong className="font-mono">{deviceCode}</strong>
+              </p>
+            )}
+          </div>
+          <Button
+            size="sm"
+            disabled={authenticating !== null}
+            onClick={() => void handleConnectDmcms()}
+            prefix={authenticating === "dmcms" ? <Spinner /> : <KeyRound className="h-4 w-4" />}
+          >
+            {authenticating === "dmcms" ? "Authorizing..." : "Connect / Authorize"}
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* ── Your MCP servers ── */}
       <div className="flex flex-col gap-3">
